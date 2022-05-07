@@ -1,75 +1,91 @@
 // Package database handles all the lower level support for maintaining the
-// blockchain on disk and maintaining an in memory databse of account information.
+// blockchain in storage and maintaining an in-memory databse of account information.
 package database
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
-	"os"
+	"sort"
 	"sync"
 
 	"github.com/ardanlabs/blockchain/foundation/blockchain/genesis"
+	"github.com/ardanlabs/blockchain/foundation/blockchain/signature"
 )
+
+// Storage interface represents the behavior required to be implemented by any
+// package providing support for reading and writing the blockchain.
+type Storage interface {
+	Write(blockData BlockData) error
+	GetBlock(num uint64) (BlockData, error)
+	ForEach() Iterator
+	Close() error
+	Reset() error
+}
+
+// Iterator interface represents the behavior required to be implemented by any
+// package providing support to iterate over the blocks.
+type Iterator interface {
+	Next() (BlockData, error)
+	Done() bool
+}
+
+// =============================================================================
 
 // Database manages data related to accounts who have transacted on the blockchain.
 type Database struct {
-	mu sync.RWMutex
-
+	mu          sync.RWMutex
 	genesis     genesis.Genesis
 	latestBlock Block
 	accounts    map[AccountID]Account
-
-	dbPath string
-	dbFile *os.File
+	storage     Storage
 }
 
 // New constructs a new database and applies account genesis information and
 // reads/writes the blockchain database on disk if a dbPath is provided.
-func New(dbPath string, genesis genesis.Genesis, evHandler func(v string, args ...any)) (*Database, error) {
-	var dbFile *os.File
-
-	if dbPath != "" {
-		var err error
-		dbFile, err = os.OpenFile(dbPath, os.O_APPEND|os.O_RDWR|os.O_CREATE, 0600)
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func New(genesis genesis.Genesis, storage Storage, evHandler func(v string, args ...any)) (*Database, error) {
 	db := Database{
 		genesis:  genesis,
 		accounts: make(map[AccountID]Account),
-		dbPath:   dbPath,
-		dbFile:   dbFile,
+		storage:  storage,
 	}
 
-	var blocks []Block
-	if dbFile != nil {
-		var err error
-		blocks, err = db.ReadAllBlocks(evHandler, true)
-		if err != nil {
-			return nil, err
-		}
-	}
-
+	// Update the database with account balance information from genesis.
 	for accountStr, balance := range genesis.Balances {
 		accountID, err := ToAccountID(accountStr)
 		if err != nil {
 			return nil, err
 		}
-		db.accounts[accountID] = Account{Balance: balance}
+		db.accounts[accountID] = newAccount(accountID, balance)
 	}
 
-	if len(blocks) > 0 {
-		db.latestBlock = blocks[len(blocks)-1]
-	}
-
-	for _, block := range blocks {
-		for _, tx := range block.Trans.Values() {
-			db.ApplyTransaction(block.Header.MinerAccountID, tx)
+	// Read all the blocks from storage.
+	iter := db.ForEach()
+	for block, err := iter.Next(); !iter.Done(); block, err = iter.Next() {
+		if err != nil {
+			return nil, err
 		}
-		db.ApplyMiningReward(block.Header.MinerAccountID)
+
+		// Validate the block values and cryptographic audit trail.
+		if err := block.ValidateBlock(db.latestBlock, db.HashState(), evHandler); err != nil {
+			return nil, err
+		}
+
+		// Update the database with account balance information from genesis.
+		for accountStr, balance := range genesis.Balances {
+			accountID, err := ToAccountID(accountStr)
+			if err != nil {
+				return nil, err
+			}
+			db.accounts[accountID] = newAccount(accountID, balance)
+		}
+
+		// Update the database with the transaction information.
+		for _, tx := range block.MerkleTree.Values() {
+			db.ApplyTransaction(block, tx)
+		}
+		db.ApplyMiningReward(block)
+
+		// Update the current latest block.
+		db.latestBlock = block
 	}
 
 	return &db, nil
@@ -77,10 +93,7 @@ func New(dbPath string, genesis genesis.Genesis, evHandler func(v string, args .
 
 // Close closes the open blocks database.
 func (db *Database) Close() {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	db.dbFile.Close()
+	db.storage.Close()
 }
 
 // Reset re-initalizes the database back to the genesis state.
@@ -88,18 +101,7 @@ func (db *Database) Reset() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	// Close and remove the current file.
-	db.dbFile.Close()
-	if err := os.Remove(db.dbPath); err != nil {
-		return err
-	}
-
-	// Open a new blockchain database file with create.
-	dbFile, err := os.OpenFile(db.dbPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	db.dbFile = dbFile
+	db.storage.Reset()
 
 	// Initalizes the database back to the genesis information.
 	db.latestBlock = Block{}
@@ -109,7 +111,8 @@ func (db *Database) Reset() error {
 		if err != nil {
 			return err
 		}
-		db.accounts[accountID] = Account{Balance: balance}
+
+		db.accounts[accountID] = newAccount(accountID, balance)
 	}
 
 	return nil
@@ -135,42 +138,38 @@ func (db *Database) CopyAccounts() map[AccountID]Account {
 	return accounts
 }
 
-// ValidateNonce validates the nonce for the specified transaction is larger
-// than the last nonce used by the account who signed the transaction.
-func (db *Database) ValidateNonce(tx SignedTx) error {
-	from, err := tx.FromAccount()
-	if err != nil {
-		return err
-	}
-
-	var account Account
+// HashState returns a hash based on the contents of the accounts and
+// their balances. This is added to each block and checked by peers.
+func (db *Database) HashState() string {
+	accounts := make([]Account, 0, len(db.accounts))
 	db.mu.RLock()
 	{
-		account = db.accounts[from]
+		for _, account := range db.accounts {
+			accounts = append(accounts, account)
+		}
 	}
 	db.mu.RUnlock()
 
-	if tx.Nonce <= account.Nonce {
-		return fmt.Errorf("invalid nonce, got %d, exp > %d", tx.Nonce, account.Nonce)
-	}
-
-	return nil
+	sort.Sort(byAccount(accounts))
+	return signature.Hash(accounts)
 }
 
 // ApplyMiningReward gives the specififed account the mining reward.
-func (db *Database) ApplyMiningReward(minerAccountID AccountID) {
+func (db *Database) ApplyMiningReward(block Block) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	account := db.accounts[minerAccountID]
-	account.Balance += db.genesis.MiningReward
+	account := db.accounts[block.Header.BeneficiaryID]
+	account.Balance += block.Header.MiningReward
 
-	db.accounts[minerAccountID] = account
+	db.accounts[block.Header.BeneficiaryID] = account
 }
 
 // ApplyTransaction performs the business logic for applying a transaction
 // to the database.
-func (db *Database) ApplyTransaction(minerID AccountID, tx BlockTx) error {
+func (db *Database) ApplyTransaction(block Block, tx BlockTx) error {
+
+	// Capture the from address from the signature of the transaction.
 	fromID, err := tx.FromAccount()
 	if err != nil {
 		return fmt.Errorf("invalid signature, %s", err)
@@ -179,35 +178,70 @@ func (db *Database) ApplyTransaction(minerID AccountID, tx BlockTx) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	{
-		if fromID == tx.ToID {
-			return fmt.Errorf("invalid transaction, sending money to yourself, from %s, to %s", fromID, tx.ToID)
+		// Capture these accounts from the database.
+		from, exists := db.accounts[fromID]
+		if !exists {
+			from = newAccount(fromID, 0)
 		}
 
-		from := db.accounts[fromID]
-		if tx.Nonce < from.Nonce {
-			return fmt.Errorf("invalid transaction, nonce too small, last %d, tx %d", from.Nonce, tx.Nonce)
+		to, exists := db.accounts[tx.ToID]
+		if !exists {
+			to = newAccount(tx.ToID, 0)
 		}
 
-		fee := tx.Gas + tx.Tip
-
-		if tx.Value+fee > db.accounts[fromID].Balance {
-			return fmt.Errorf("%s has an insufficient balance", fromID)
+		bnfc, exists := db.accounts[block.Header.BeneficiaryID]
+		if !exists {
+			bnfc = newAccount(block.Header.BeneficiaryID, 0)
 		}
 
-		to := db.accounts[tx.ToID]
-		miner := db.accounts[minerID]
+		// The account needs to pay the gas fee regardless. Take the
+		// remaining balance if the account doesn't hold enough for the
+		// full amount of gas. This is the only way to stop bad actors.
+		gasFee := tx.GasPrice * tx.GasUnits
+		if gasFee > from.Balance {
+			gasFee = from.Balance
+		}
+		from.Balance -= gasFee
+		bnfc.Balance += gasFee
 
+		// Make sure these changes get applied.
+		db.accounts[fromID] = from
+		db.accounts[block.Header.BeneficiaryID] = bnfc
+
+		// Perform basic accounting checks.
+		{
+			if tx.ChainID != db.genesis.ChainID {
+				return fmt.Errorf("transaction invalid, wrong chain id, got %d, exp %d", tx.ChainID, db.genesis.ChainID)
+			}
+
+			if fromID == tx.ToID {
+				return fmt.Errorf("transaction invalid, sending money to yourself, from %s, to %s", fromID, tx.ToID)
+			}
+
+			if tx.Nonce <= from.Nonce {
+				return fmt.Errorf("transaction invalid, nonce too small, current %d, provided %d", from.Nonce, tx.Nonce)
+			}
+
+			if from.Balance == 0 || from.Balance < (tx.Value+tx.Tip) {
+				return fmt.Errorf("transaction invalid, insufficient funds, bal %d, needed %d", from.Balance, (tx.Value + tx.Tip))
+			}
+		}
+
+		// Update the balances between the two parties.
 		from.Balance -= tx.Value
 		to.Balance += tx.Value
 
-		from.Balance -= fee
-		miner.Balance += fee
+		// Give the beneficiary the tip.
+		from.Balance -= tx.Tip
+		bnfc.Balance += tx.Tip
 
+		// Update the nonce for the next transaction check.
 		from.Nonce = tx.Nonce
 
+		// Update the final changes to these accounts.
 		db.accounts[fromID] = from
 		db.accounts[tx.ToID] = to
-		db.accounts[minerID] = miner
+		db.accounts[block.Header.BeneficiaryID] = bnfc
 	}
 
 	return nil
@@ -230,60 +264,46 @@ func (db *Database) LatestBlock() Block {
 }
 
 // Write adds a new block to the chain.
-func (db *Database) Write(block BlockFS) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	// Marshal the block for writing to disk.
-	blockFSJson, err := json.Marshal(block)
-	if err != nil {
-		return err
-	}
-
-	// Write the new block to the chain on disk.
-	if _, err := db.dbFile.Write(append(blockFSJson, '\n')); err != nil {
-		return err
-	}
-
-	return nil
+func (db *Database) Write(block Block) error {
+	return db.storage.Write(NewBlockData(block))
 }
 
-// ReadAllBlocks loads all existing blocks from storage into memory. In a real
-// world situation this would require a lot of memory.
-func (db *Database) ReadAllBlocks(evHandler func(v string, args ...any), validate bool) ([]Block, error) {
-	dbFile, err := os.Open(db.dbPath)
+// ForEach returns an iterator to walk through all the blocks
+// starting with block number 1.
+func (db *Database) ForEach() DatabaseIterator {
+	return DatabaseIterator{iterator: db.storage.ForEach()}
+}
+
+// GetBlock searches the blockchain on disk to locate and return the
+// contents of the specified block by number.
+func (db *Database) GetBlock(num uint64) (Block, error) {
+	blockData, err := db.storage.GetBlock(num)
 	if err != nil {
-		return nil, err
-	}
-	defer dbFile.Close()
-
-	var blocks []Block
-	var latestBlock Block
-	scanner := bufio.NewScanner(dbFile)
-	for scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, err
-		}
-
-		var blockFS BlockFS
-		if err := json.Unmarshal(scanner.Bytes(), &blockFS); err != nil {
-			return nil, err
-		}
-
-		block, err := ToBlock(blockFS)
-		if err != nil {
-			return nil, err
-		}
-
-		if validate {
-			if err := block.ValidateBlock(latestBlock, evHandler); err != nil {
-				return nil, err
-			}
-		}
-
-		blocks = append(blocks, block)
-		latestBlock = block
+		return Block{}, err
 	}
 
-	return blocks, nil
+	return ToBlock(blockData)
+}
+
+// =============================================================================
+
+// DatabaseIterator provides support for iterating over the blocks in the
+// blockchain database using the configured storage option.
+type DatabaseIterator struct {
+	iterator Iterator
+}
+
+// Next retrieves the next block from disk.
+func (di *DatabaseIterator) Next() (Block, error) {
+	blockData, err := di.iterator.Next()
+	if err != nil {
+		return Block{}, err
+	}
+
+	return ToBlock(blockData)
+}
+
+// Done returns the end of chain value.
+func (di *DatabaseIterator) Done() bool {
+	return di.iterator.Done()
 }

@@ -44,6 +44,7 @@ func PublicRoutes(app *web.App, cfg Config) {
 	app.Handle(http.MethodGet, version, "/tx/uncommitted/list", pbl.Mempool)
 	app.Handle(http.MethodGet, version, "/tx/uncommitted/list/:account", pbl.Mempool)
 	app.Handle(http.MethodPost, version, "/tx/submit", pbl.SubmitWalletTransaction)
+	app.Handle(http.MethodPost, version, "/tx/proof/:block/", pbl.SubmitWalletTransaction)
 }
 
 // PrivateRoutes binds all the version 1 private routes.
@@ -54,6 +55,7 @@ func PrivateRoutes(app *web.App, cfg Config) {
 		NS:    cfg.NS,
 	}
 
+	app.Handle(http.MethodPost, version, "/node/peers", prv.SubmitPeer)
 	app.Handle(http.MethodGet, version, "/node/status", prv.Status)
 	app.Handle(http.MethodGet, version, "/node/block/list/:from/:to", prv.BlocksByNumber)
 	app.Handle(http.MethodPost, version, "/node/block/propose", prv.ProposeBlock)

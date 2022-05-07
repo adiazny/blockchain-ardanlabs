@@ -29,8 +29,8 @@ type Hashable[T any] interface {
 // behavior defined by the Hashable constraint.
 type Tree[T Hashable[T]] struct {
 	Root         *Node[T]
-	MerkleRoot   []byte
 	Leafs        []*Node[T]
+	MerkleRoot   []byte
 	hashStrategy func() hash.Hash
 }
 
@@ -55,17 +55,17 @@ func NewTree[T Hashable[T]](values []T, options ...func(t *Tree[T])) (*Tree[T], 
 		option(&t)
 	}
 
-	if err := t.GenerateTree(values); err != nil {
+	if err := t.Generate(values); err != nil {
 		return nil, err
 	}
 
 	return &t, nil
 }
 
-// GenerateTree constructs the leafs and nodes of the tree from the specified
+// Generate constructs the leafs and nodes of the tree from the specified
 // data. If the tree has been generated previously, the tree is re-generated
 // from scratch.
-func (t *Tree[T]) GenerateTree(values []T) error {
+func (t *Tree[T]) Generate(values []T) error {
 	if len(values) == 0 {
 		return errors.New("cannot construct tree with no content")
 	}
@@ -108,54 +108,78 @@ func (t *Tree[T]) GenerateTree(values []T) error {
 	return nil
 }
 
-// RebuildTree is a helper function that will rebuild the tree reusing only the
+// Rebuild is a helper function that will rebuild the tree reusing only the
 // data that it currently holds in the leaves.
-func (t *Tree[T]) RebuildTree() error {
+func (t *Tree[T]) Rebuild() error {
 	var data []T
 	for _, node := range t.Leafs {
 		data = append(data, node.Value)
 	}
 
-	if err := t.GenerateTree(data); err != nil {
+	if err := t.Generate(data); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// MerklePath gets the tree path and indexes (left leaf or right leaf)
-// for the specified data.
-func (t *Tree[T]) MerklePath(data T) (merklePath [][]byte, index []int64, err error) {
+// Proof returns the set of hashes and the order of concatenating those
+// hashes for proving a transaction is in the tree. This is how you can use
+// the information returned by this function.
+//
+// Hash the data in question and know the merkle tree root hash.
+// dataHash = "0x8e4c64afaeb4e6210a65eb7a54e51d90d20112a4c085209d3db12f0597f16fd6"
+// merkle_root = "0xbc43b5296b8adc75aea5f1d9220bf3bc9dc0dbed9a75d367784b50a7bbbd1211"
+//
+// Given this proof and proof order from this function for the data in question.
+// proof = [
+//     "0x23d2d2f2a0cbfb260492d42604728cdf8fd63b7d84e4a58094b90dbdd103cd23",
+//     "0xdf25fb5ab5d1373ed6e260ead0a5c7b5fc78b0e9ccf9e09407a67bd2faaf3120",
+//     "0x9dc3d2d31256f20044646614d0a6326627ccc5f1c42019c552c5929a5b9170f3"]
+//
+// proof_order = [0, 1, 1]
+//
+// Process the dataHash against the proof like this.
+// bytes = concat(proof[0], dataHash)  -- Order 0 says proof comes first.
+//  sha1 = sha256.Sum256(bytes)
+// bytes = concat(sha1, proof[1])      -- Order 1 says proof comes second.
+//  sha2 = sha256.Sum256(bytes)
+// bytes = concat(sha2, proof[2])      -- Order 1 says proof comes second.
+//  root = sha256.Sum256(bytes)
+//
+// The calculated root should match merkle_root.
+func (t *Tree[T]) Proof(data T) ([][]byte, []int64, error) {
 	for _, node := range t.Leafs {
 		if !node.Value.Equals(data) {
 			continue
 		}
 
+		var merkleProof [][]byte
+		var order []int64
 		nodeParent := node.Parent
-		var merklePath [][]byte
-		var index []int64
+
 		for nodeParent != nil {
 			if bytes.Equal(nodeParent.Left.Hash, node.Hash) {
-				merklePath = append(merklePath, nodeParent.Right.Hash)
-				index = append(index, 1) // right leaf
+				merkleProof = append(merkleProof, nodeParent.Right.Hash)
+				order = append(order, 1) // right leaf, concat second.
 			} else {
-				merklePath = append(merklePath, nodeParent.Left.Hash)
-				index = append(index, 0) // left leaf
+				merkleProof = append(merkleProof, nodeParent.Left.Hash)
+				order = append(order, 0) // left leaf, concat first.
 			}
 			node = nodeParent
 			nodeParent = nodeParent.Parent
 		}
 
-		return merklePath, index, nil
+		return merkleProof, order, nil
 	}
 
 	return nil, nil, errors.New("unable to find data in tree")
 }
 
-// VerifyTree validates the hashes at each level of the tree and returns true
+// Verify validates the hashes at each level of the tree and returns true
 // if the resulting hash at the root of the tree matches the resulting root hash.
-func (t *Tree[T]) VerifyTree() error {
-	calculatedMerkleRoot, err := t.Root.verifyNode()
+func (t *Tree[T]) Verify() error {
+	calculatedMerkleRoot, err := t.Root.verify()
 	if err != nil {
 		return err
 	}
@@ -180,12 +204,12 @@ func (t *Tree[T]) VerifyData(data T) error {
 
 		currentParent := node.Parent
 		for currentParent != nil {
-			rightBytes, err := currentParent.Right.CalculateNodeHash()
+			rightBytes, err := currentParent.Right.CalculateHash()
 			if err != nil {
 				return err
 			}
 
-			leftBytes, err := currentParent.Left.CalculateNodeHash()
+			leftBytes, err := currentParent.Left.CalculateHash()
 			if err != nil {
 				return err
 			}
@@ -208,11 +232,6 @@ func (t *Tree[T]) VerifyData(data T) error {
 	return errors.New("merkle root is not equivalent to the merkle root calculated on the critical path")
 }
 
-// MerkelRootHex provides the hexidecimal encoding of the merkel root.
-func (t *Tree[T]) MerkelRootHex() string {
-	return hex.EncodeToString(t.MerkleRoot)
-}
-
 // Values returns a slice of unique values stores in the tree. The last
 // value in the tree might be a duplicate when there are an odd number of
 // actual values.
@@ -230,6 +249,11 @@ func (t *Tree[T]) Values() []T {
 	return values
 }
 
+// RootHex converts the merkle root byte hash to a hex encoded string.
+func (t *Tree[T]) RootHex() string {
+	return ToHex(t.MerkleRoot)
+}
+
 // String returns a string representation of the tree. Only leaf nodes are
 // included in the output.
 func (t *Tree[T]) String() string {
@@ -241,6 +265,13 @@ func (t *Tree[T]) String() string {
 	}
 
 	return s
+}
+
+// MarshalText implements the TextMarshaler interface and produces a panic
+// if anyone tries to marshal the Merkle tree. I don't want this to happen.
+// Use the Values function to return a slice that can be marshaled.
+func (t *Tree[T]) MarshalText() (text []byte, err error) {
+	panic("do not marshal the merkle tree, use Values")
 }
 
 // =============================================================================
@@ -258,19 +289,19 @@ type Node[T Hashable[T]] struct {
 	dup    bool
 }
 
-// verifyNode walks down the tree until hitting a leaf, calculating the hash at
+// verify walks down the tree until hitting a leaf, calculating the hash at
 // each level and returning the resulting hash of the node.
-func (n *Node[T]) verifyNode() ([]byte, error) {
+func (n *Node[T]) verify() ([]byte, error) {
 	if n.leaf {
 		return n.Value.Hash()
 	}
 
-	rightBytes, err := n.Right.verifyNode()
+	rightBytes, err := n.Right.verify()
 	if err != nil {
 		return nil, err
 	}
 
-	leftBytes, err := n.Left.verifyNode()
+	leftBytes, err := n.Left.verify()
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +314,8 @@ func (n *Node[T]) verifyNode() ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// CalculateNodeHash is a helper function that calculates the hash of the node.
-func (n *Node[T]) CalculateNodeHash() ([]byte, error) {
+// CalculateHash is a helper function that calculates the hash of the node.
+func (n *Node[T]) CalculateHash() ([]byte, error) {
 	if n.leaf {
 		return n.Value.Hash()
 	}
@@ -303,6 +334,11 @@ func (n *Node[T]) String() string {
 }
 
 // =============================================================================
+
+// ToHex converts a hash in bytes to a hex encoded string.
+func ToHex(hash []byte) string {
+	return fmt.Sprintf("0x%s", hex.EncodeToString(hash))
+}
 
 // buildIntermediate is a helper function that for a given list of leaf nodes,
 // constructs the intermediate and root levels of the tree. Returns the resulting

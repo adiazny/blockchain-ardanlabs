@@ -2,7 +2,9 @@
 package mempool
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 
@@ -50,9 +52,25 @@ func (mp *Mempool) Upsert(tx database.BlockTx) error {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 
+	// CORE NOTE: Different blockchains have different algorithms to limit the
+	// size of the mempool. Some limit based on the amount of memory being
+	// consumed and some may limit based on the number of transaction. If a limit
+	// is met, then either the transaction that has the least return on investment
+	// or the oldest will be dropped from the pool to make room for new the transaction.
+
+	// For now, the Ardan blockchain in not imposing any limits.
 	key, err := mapKey(tx)
 	if err != nil {
 		return err
+	}
+
+	// Ethereum requires a 10% bump in the tip to replace an existing
+	// transaction in the mempool and so do we. We want to limit users
+	// from this sort of behavior.
+	if etx, exists := mp.pool[key]; exists {
+		if tx.Tip < uint64(math.Round(float64(etx.Tip)*1.10)) {
+			return errors.New("replacing a transaction requires a 10% bump in the tip")
+		}
 	}
 
 	mp.pool[key] = tx
@@ -83,21 +101,31 @@ func (mp *Mempool) Truncate() {
 	mp.pool = make(map[string]database.BlockTx)
 }
 
-// PickBest uses the configured sort strategy to return the next set
-// of transactions for the next block.
-func (mp *Mempool) PickBest(howMany ...int) []database.BlockTx {
-	number := -1
+// PickBest uses the configured sort strategy to return a set of transactions.
+// If 0 is passed, all transactions in the mempool will be returned.
+func (mp *Mempool) PickBest(howMany ...uint16) []database.BlockTx {
+	number := 0
 	if len(howMany) > 0 {
-		number = howMany[0]
+		number = int(howMany[0])
 	}
 
-	// Copy all the transactions for each account into separate
-	// slices for each account.
+	// CORE NOTE: Most blockchains do set a max block size limit and this size
+	// will determined which transactions are selected. When picking the best
+	// transactions for the next block, the Ardan blockchain is currently not
+	// focused on block size but a max number of transactions.
+	//
+	// When the selection algorithm does need to consider sizing, picking the
+	// right transactions that maximize profit gets really hard. On top of this,
+	// today a miner gets a mining reward for each mined block. In the future
+	// this could go away leaving just fees for the transactions that are
+	// selected as the only form of revenue. This will change how transactions
+	// need to be selected.
 
+	// Copy all the transactions for each account into separate slices.
 	m := make(map[database.AccountID][]database.BlockTx)
 	mp.mu.RLock()
 	{
-		if number == -1 {
+		if number == 0 {
 			number = len(mp.pool)
 		}
 
@@ -108,6 +136,8 @@ func (mp *Mempool) PickBest(howMany ...int) []database.BlockTx {
 	}
 	mp.mu.RUnlock()
 
+	// The selection algorithms is expecting this slice of transactions
+	// organized by account.
 	return mp.selectFn(m, number)
 }
 

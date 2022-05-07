@@ -9,6 +9,7 @@ import (
 	"github.com/ardanlabs/blockchain/foundation/blockchain/genesis"
 	"github.com/ardanlabs/blockchain/foundation/blockchain/mempool"
 	"github.com/ardanlabs/blockchain/foundation/blockchain/peer"
+	"github.com/ardanlabs/blockchain/foundation/blockchain/storage/disk"
 )
 
 /*
@@ -16,12 +17,13 @@ import (
 	Then add a graphical way of seeing the data.
 
 	-- Chrome Wallet
-	Ask for a Merkle proof that a transaction is in the last block.
 
 	-- Blockchain
-	Add integration test for the state package.
-	Consider adding transaction receipts similar to Ethereum.
-	Change out HTTP to JSON-RPC.
+	On chain fork, only remove the block need to be removed and reset.
+
+	-- Testing
+	Fork Test
+	Mining Test
 */
 
 // =============================================================================
@@ -45,7 +47,7 @@ type Worker interface {
 // Config represents the configuration required to start
 // the blockchain node.
 type Config struct {
-	MinerAccountID database.AccountID
+	BeneficiaryID  database.AccountID
 	Host           string
 	DBPath         string
 	SelectStrategy string
@@ -57,10 +59,10 @@ type Config struct {
 type State struct {
 	mu sync.RWMutex
 
-	minerAccountID database.AccountID
-	host           string
-	dbPath         string
-	evHandler      EventHandler
+	beneficiaryID database.AccountID
+	host          string
+	dbPath        string
+	evHandler     EventHandler
 
 	allowMining bool
 	resyncWG    sync.WaitGroup
@@ -90,8 +92,14 @@ func New(cfg Config) (*State, error) {
 		return nil, err
 	}
 
+	storage, err := disk.New(cfg.DBPath)
+	//storage, err := memory.New()
+	if err != nil {
+		return nil, err
+	}
+
 	// Access the storage for the blockchain.
-	db, err := database.New(cfg.DBPath, genesis, ev)
+	db, err := database.New(genesis, storage, ev)
 	if err != nil {
 		return nil, err
 	}
@@ -104,11 +112,11 @@ func New(cfg Config) (*State, error) {
 
 	// Create the State to provide support for managing the blockchain.
 	state := State{
-		minerAccountID: cfg.MinerAccountID,
-		host:           cfg.Host,
-		dbPath:         cfg.DBPath,
-		evHandler:      ev,
-		allowMining:    true,
+		beneficiaryID: cfg.BeneficiaryID,
+		host:          cfg.Host,
+		dbPath:        cfg.DBPath,
+		evHandler:     ev,
+		allowMining:   true,
 
 		knownPeers: cfg.KnownPeers,
 		genesis:    genesis,
@@ -141,7 +149,7 @@ func (s *State) Shutdown() error {
 	return nil
 }
 
-// IsMiningAllowed identifies if we are allows to mine blocks. This
+// IsMiningAllowed identifies if we are allowed to mine blocks. This
 // might be turned off if the blockchain needs to be re-synced.
 func (s *State) IsMiningAllowed() bool {
 	s.mu.RLock()
@@ -158,10 +166,9 @@ func (s *State) TurnMiningOn() {
 	s.allowMining = true
 }
 
-// Resync resets the chain both on disk and in memory. This is used to
-// correct an identified fork. No mining is allowed to take place while this
-// process is running. New transactions can be placed into the mempool.
-func (s *State) Resync() error {
+// Reorganize corrects an identified fork. No mining is allowed to take place
+// while this process is running. New transactions can be placed into the mempool.
+func (s *State) Reorganize() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

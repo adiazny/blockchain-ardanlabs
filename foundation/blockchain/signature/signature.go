@@ -16,7 +16,7 @@ import (
 )
 
 // ZeroHash represents a hash code of zeros.
-const ZeroHash string = "00000000000000000000000000000000"
+const ZeroHash string = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 // ardanID is an arbitrary number for signing messages. This will make it
 // clear that the signature comes from the Ardan blockchain.
@@ -33,10 +33,10 @@ func Hash(value any) string {
 	}
 
 	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
+	return "0x" + hex.EncodeToString(hash[:])
 }
 
-// Sign uses the specified private key to sign the user transaction.
+// Sign uses the specified private key to sign the transaction.
 func Sign(value any, privateKey *ecdsa.PrivateKey) (v, r, s *big.Int, err error) {
 
 	// Prepare the transaction for signing.
@@ -153,8 +153,8 @@ func ToVRSFromHexSignature(sigStr string) (v, r, s *big.Int, err error) {
 
 // =============================================================================
 
-// stamp returns a hash of 32 bytes that represents this user
-// transaction with the Ardan stamp embedded into the final hash.
+// stamp returns a hash of 32 bytes that represents this transaction with
+// the Ardan stamp embedded into the final hash.
 func stamp(value any) ([]byte, error) {
 
 	// Marshal the data.

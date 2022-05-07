@@ -15,6 +15,7 @@ type Events struct {
 
 // New constructs an events for registering and receiving events.
 func New() *Events {
+
 	return &Events{
 		m: make(map[string]chan string),
 	}
@@ -43,7 +44,12 @@ func (evt *Events) Acquire(id string) chan string {
 		return ch
 	}
 
-	evt.m[id] = make(chan string)
+	// Since a message will be dropped if the websocket receiver is
+	// not ready to receive, this arbitary buffer should give the receiver
+	// enough time to not lose a message. Websocket send could take long.
+	const messageBuffer = 100
+
+	evt.m[id] = make(chan string, messageBuffer)
 	return evt.m[id]
 }
 

@@ -31,12 +31,15 @@ func (h Handlers) SubmitNodeTransaction(ctx context.Context, w http.ResponseWrit
 		return web.NewShutdownError("web value missing from context")
 	}
 
+	// Decode the JSON in the post call into a block transaction.
 	var tx database.BlockTx
 	if err := web.Decode(r, &tx); err != nil {
 		return fmt.Errorf("unable to decode payload: %w", err)
 	}
 
-	h.Log.Infow("add user tran", "traceid", v.TraceID, "from:nonce", tx, "to", tx.ToID, "value", tx.Value, "tip", tx.Tip)
+	// Ask the state package to add this transaction to the mempool and perform
+	// any other business logic.
+	h.Log.Infow("add tran", "traceid", v.TraceID, "from:nonce", tx, "to", tx.ToID, "value", tx.Value, "tip", tx.Tip)
 	if err := h.State.UpsertNodeTransaction(tx); err != nil {
 		return v1.NewRequestError(err, http.StatusBadRequest)
 	}
@@ -53,19 +56,25 @@ func (h Handlers) SubmitNodeTransaction(ctx context.Context, w http.ResponseWrit
 // ProposeBlock takes a block received from a peer, validates it and
 // if that passes, adds the block to the local blockchain.
 func (h Handlers) ProposeBlock(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	var blockFS database.BlockFS
-	if err := web.Decode(r, &blockFS); err != nil {
+
+	// Decode the JSON in the post call into a file system block.
+	var blockData database.BlockData
+	if err := web.Decode(r, &blockData); err != nil {
 		return fmt.Errorf("unable to decode payload: %w", err)
 	}
 
-	block, err := database.ToBlock(blockFS)
+	// Convert the block data into a block. This action will create a merkle
+	// tree for the set of transactions required for blockchain operations.
+	block, err := database.ToBlock(blockData)
 	if err != nil {
 		return fmt.Errorf("unable to decode block: %w", err)
 	}
 
-	if err := h.State.ValidateProposedBlock(block); err != nil {
+	// Ask the state package to validate the proposed block. If the block
+	// passes validation, it will be added to the blockchain database.
+	if err := h.State.ProcessProposedBlock(block); err != nil {
 		if errors.Is(err, database.ErrChainForked) {
-			h.State.Resync()
+			h.State.Reorganize()
 		}
 
 		return v1.NewRequestError(errors.New("block not accepted"), http.StatusNotAcceptable)
@@ -78,6 +87,25 @@ func (h Handlers) ProposeBlock(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 
 	return web.Respond(ctx, w, resp, http.StatusOK)
+}
+
+// SubmitPeer is called by a node so they can be added to the known peer list.
+func (h Handlers) SubmitPeer(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	v, err := web.GetValues(ctx)
+	if err != nil {
+		return web.NewShutdownError("web value missing from context")
+	}
+
+	var peer peer.Peer
+	if err := web.Decode(r, &peer); err != nil {
+		return fmt.Errorf("unable to decode payload: %w", err)
+	}
+
+	if !h.State.AddKnownPeer(peer) {
+		h.Log.Infow("adding peer", "traceid", v.TraceID, "host", peer.Host)
+	}
+
+	return web.Respond(ctx, w, nil, http.StatusOK)
 }
 
 // Status returns the current status of the node.
@@ -123,12 +151,12 @@ func (h Handlers) BlocksByNumber(ctx context.Context, w http.ResponseWriter, r *
 		return web.Respond(ctx, w, nil, http.StatusNoContent)
 	}
 
-	blocksFS := make([]database.BlockFS, len(blocks))
+	blockData := make([]database.BlockData, len(blocks))
 	for i, block := range blocks {
-		blocksFS[i] = database.NewBlockFS(block)
+		blockData[i] = database.NewBlockData(block)
 	}
 
-	return web.Respond(ctx, w, blocksFS, http.StatusOK)
+	return web.Respond(ctx, w, blockData, http.StatusOK)
 }
 
 // Mempool returns the set of uncommitted transactions.

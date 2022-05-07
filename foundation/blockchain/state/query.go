@@ -30,21 +30,22 @@ func (s *State) QueryMempoolLength() int {
 // QueryBlocksByNumber returns the set of blocks based on block numbers. This
 // function reads the blockchain from disk first.
 func (s *State) QueryBlocksByNumber(from uint64, to uint64) []database.Block {
-	blocks, err := s.db.ReadAllBlocks(s.evHandler, false)
-	if err != nil {
-		return []database.Block{}
-	}
-
 	if from == QueryLastest {
-		from = blocks[len(blocks)-1].Header.Number
+		from = s.db.LatestBlock().Header.Number
 		to = from
+	}
+	if to == QueryLastest {
+		to = s.db.LatestBlock().Header.Number
 	}
 
 	var out []database.Block
-	for _, block := range blocks {
-		if block.Header.Number >= from && block.Header.Number <= to {
-			out = append(out, block)
+	for i := from; i <= to; i++ {
+		block, err := s.db.GetBlock(i)
+		if err != nil {
+			s.evHandler("state: getblock: ERROR: %s", err)
+			return nil
 		}
+		out = append(out, block)
 	}
 
 	return out
@@ -53,26 +54,27 @@ func (s *State) QueryBlocksByNumber(from uint64, to uint64) []database.Block {
 // QueryBlocksByAccount returns the set of blocks by account. If the account
 // is empty, all blocks are returned. This function reads the blockchain
 // from disk first.
-func (s *State) QueryBlocksByAccount(accountID database.AccountID) []database.Block {
-	blocks, err := s.db.ReadAllBlocks(s.evHandler, false)
-	if err != nil {
-		return []database.Block{}
-	}
-
+func (s *State) QueryBlocksByAccount(accountID database.AccountID) ([]database.Block, error) {
 	var out []database.Block
-blocks:
-	for _, block := range blocks {
-		for _, tx := range block.Trans.Values() {
+
+	iter := s.db.ForEach()
+	for block, err := iter.Next(); !iter.Done(); block, err = iter.Next() {
+		if err != nil {
+			return nil, err
+		}
+
+		for _, tx := range block.MerkleTree.Values() {
 			fromID, err := tx.FromAccount()
 			if err != nil {
 				continue
 			}
+
 			if accountID == "" || fromID == accountID || tx.ToID == accountID {
 				out = append(out, block)
-				continue blocks
+				break
 			}
 		}
 	}
 
-	return out
+	return out, nil
 }

@@ -3,14 +3,16 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
-	"github.com/ardanlabs/blockchain/foundation/blockchain/database"
 	"github.com/ardanlabs/blockchain/foundation/blockchain/state"
 )
+
+// CORE NOTE: The POW mining operation is managed by this goroutine. When
+// a startMining signal is received (mainly because a wallet transaction
+// was received) a block is created and then the POW operation starts. This
+// operation can be cancelled if a proposed block is received and is validated.
 
 // miningOperations handles mining.
 func (w *Worker) miningOperations() {
@@ -126,33 +128,11 @@ func (w *Worker) runMiningOperation() {
 
 		// WOW, we mined a block. Propose the new block to the network.
 		// Log the error, but that's it.
-		if err := w.proposeBlockToPeers(block); err != nil {
+		if err := w.state.NetSendBlockToPeers(block); err != nil {
 			w.evHandler("worker: runMiningOperation: MINING: proposeBlockToPeers: WARNING %s", err)
 		}
 	}()
 
 	// Wait for both G's to terminate.
 	wg.Wait()
-}
-
-// proposeBlockToPeers takes the new mined block and sends it to all know peers.
-func (w *Worker) proposeBlockToPeers(block database.Block) error {
-	w.evHandler("worker: runMiningOperation: MINING: proposeBlockToPeers: started")
-	defer w.evHandler("worker: runMiningOperation: MINING: proposeBlockToPeers: completed")
-
-	for _, peer := range w.state.RetrieveKnownPeers() {
-		url := fmt.Sprintf("%s/block/propose", fmt.Sprintf(w.baseURL, peer.Host))
-
-		var status struct {
-			Status string `json:"status"`
-		}
-
-		if err := send(http.MethodPost, url, database.NewBlockFS(block), &status); err != nil {
-			return fmt.Errorf("%s: %s", peer.Host, err)
-		}
-
-		w.evHandler("worker: runMiningOperation: MINING: proposeBlockToPeers: sent to peer[%s]", peer)
-	}
-
-	return nil
 }

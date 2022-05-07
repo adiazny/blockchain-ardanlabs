@@ -64,6 +64,8 @@ Occasionally we run into material that we feel is important. This is a section p
 ### Coins
 [Tether](https://tether.to/en/)  
 [Looks Rare](https://coinmarketcap.com/currencies/looksrare/)  
+[Centre USDC: A stablecoin brought to you by circle and coinbase](https://www.centre.io/usdc)  
+[Terra LUNA: Programmable money for the internet](https://www.terra.money/)  
 
 ### Companies
 [0x: Professional grade liquidity aggregator enabling the future of DeFi applications](https://0x.org/)  
@@ -80,6 +82,7 @@ Occasionally we run into material that we feel is important. This is a section p
 [Strike: Bitcoin Wallet](https://strike.me/en/)  
 [Tendermint: Building the most powerful tools for distributed networks](https://tendermint.com/)  
 [The Graph: The Graph is an indexing protocol for querying networks like Ethereum and IPFS](https://thegraph.com/en/)  
+[Anchor: Banking on the blockchain](https://www.app-achnorprotocol.com/)  
 
 ### Conferences
 [Miami Hack Week](https://www.miamihackweek.com/)  
@@ -182,6 +185,7 @@ Ethereum documentation that helps to better understand that blockchain project.
 [Beacon Chain](https://ethereum.org/en/upgrades/beacon-chain/)  
 [Proof of Stake FAQ](https://vitalik.ca/general/2017/12/31/pos_faq.html) - Vitalik Buterin    
 [The Beacon Chain Ethereum 2.0 explainer you need to read first](https://ethos.dev/beacon-chain/) - ethos.dev  
+[Prysm: An Ethereum Consensus Implementation Written in Go](https://github.com/prysmaticlabs/prysm)  
 
 ### Zero Address
 [Etherscan Address Zero](https://etherscan.io/address/0x0000000000000000000000000000000000000000)  
